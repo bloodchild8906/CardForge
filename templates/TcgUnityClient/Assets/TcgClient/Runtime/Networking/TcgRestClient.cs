@@ -27,6 +27,9 @@ namespace TcgServer.Client
         public IEnumerator Login(string handle, string password, Action<AuthSessionDto> completed, Action<TcgApiError> failed) =>
             Authenticate("/api/auth/login", handle, password, completed, failed);
 
+        public IEnumerator Logout(string token, Action completed, Action<TcgApiError> failed) =>
+            SendJson(UnityWebRequest.kHttpVerbDELETE, "/api/auth/session", null, token, _ => completed(), failed);
+
         public IEnumerator Rankings(Action<RankingDto[]> completed, Action<TcgApiError> failed) =>
             GetJson("/api/rankings", null, json => completed(JsonArrayUtility.FromJson<RankingDto>(json)), failed);
 
@@ -67,11 +70,11 @@ namespace TcgServer.Client
                 failed);
         }
 
-        public IEnumerator Game(string gameId, Action<GameStateDto> completed, Action<TcgApiError> failed) =>
-            GetJson($"/api/games/{UnityWebRequest.EscapeURL(gameId)}", null, json => completed(JsonUtility.FromJson<GameStateDto>(json)), failed);
+        public IEnumerator Game(string token, string gameId, Action<GameStateDto> completed, Action<TcgApiError> failed) =>
+            GetJson($"/api/games/{UnityWebRequest.EscapeURL(gameId)}", token, json => completed(JsonUtility.FromJson<GameStateDto>(json)), failed);
 
-        public IEnumerator Games(Action<GameStateDto[]> completed, Action<TcgApiError> failed) =>
-            GetJson("/api/games", null, json => completed(JsonArrayUtility.FromJson<GameStateDto>(json)), failed);
+        public IEnumerator Games(string token, Action<GameStateDto[]> completed, Action<TcgApiError> failed) =>
+            GetJson("/api/games", token, json => completed(JsonArrayUtility.FromJson<GameStateDto>(json)), failed);
 
         public IEnumerator Rules(Action<RulePackDto[]> completed, Action<TcgApiError> failed) =>
             GetJson("/api/rules", null, json => completed(JsonArrayUtility.FromJson<RulePackDto>(json)), failed);

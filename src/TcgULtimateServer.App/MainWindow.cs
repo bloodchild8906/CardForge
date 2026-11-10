@@ -391,7 +391,7 @@ public sealed class MainWindow : Window
                 ("Content packs and assets", "READY · ADMIN"),
                 ("Deck review and suspension", "READY · ADMIN"),
                 ("Game workflows and configuration", "READY · ADMIN"),
-                ("Visual content studio", "ROADMAP")
+                ("Visual content studio", "READY · ADMIN")
             }, Symbol.Library),
             FeatureDirectoryCard("PLAYER OPERATIONS", "Accounts and player intelligence", new[]
             {

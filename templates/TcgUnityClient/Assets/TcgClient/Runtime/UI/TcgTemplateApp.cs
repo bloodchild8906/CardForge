@@ -365,8 +365,12 @@ namespace TcgServer.Client
 
         private void RefreshGameBrowser()
         {
+            if (!RequireSession())
+                return;
+
             gameBrowserStatus.text = "Refreshing active and recorded games...";
             StartCoroutine(rest.Games(
+                session.Token,
                 games =>
                 {
                     gameBrowserSummary.text = games.Length == 0
@@ -405,6 +409,7 @@ namespace TcgServer.Client
             while (gamePage.activeSelf && !string.IsNullOrWhiteSpace(currentGameId))
             {
                 yield return rest.Game(
+                    session.Token,
                     currentGameId,
                     RenderGame,
                     error => gameStatus.text = error.ToString());
@@ -486,6 +491,7 @@ namespace TcgServer.Client
 
         private void SignOut()
         {
+            var token = session.Token;
             _ = gameConnection.DisconnectAsync();
             session.Clear();
             operatorStatus.text = "NOT SIGNED IN";
@@ -493,6 +499,8 @@ namespace TcgServer.Client
             if (gamePolling != null)
                 StopCoroutine(gamePolling);
             ShowPage(loginPage);
+            if (!string.IsNullOrWhiteSpace(token))
+                StartCoroutine(rest.Logout(token, () => { }, _ => { }));
         }
 
         private void ShowPage(GameObject page)

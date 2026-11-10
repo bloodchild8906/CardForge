@@ -335,7 +335,7 @@ public record StateMachineConfiguration(
     List<string>? TerminalStates = null,
     Dictionary<string, Dictionary<string, JsonElement>>? StateMetadata = null);
 public record StateMachineValidationResult(bool Valid, List<string> Errors, StateMachineConfiguration? Normalized = null);
-public record CreateStateMachineRequest(string ConfigurationId, Dictionary<string, JsonElement>? Data = null);
+public record CreateStateMachineRequest(string ConfigurationId, Dictionary<string, JsonElement>? Data = null, List<string>? ParticipantIds = null);
 public record TransitionStateMachineRequest(string Event, JsonElement? Data = null);
 public record StateMachineEvent(string Event, string From, string To, string? ActorId = null, JsonElement? Data = null, DateTimeOffset? At = null);
 
@@ -343,6 +343,8 @@ public class StateMachineInstance
 {
     public string Id { get; init; } = Guid.NewGuid().ToString("N");
     public string ConfigurationId { get; init; } = "";
+    public string OwnerId { get; init; } = "";
+    public List<string> ParticipantIds { get; init; } = [];
     public string CurrentState { get; set; } = "";
     public Dictionary<string, JsonElement> Data { get; init; } = [];
     public Dictionary<string, JsonElement> Context { get; init; } = [];

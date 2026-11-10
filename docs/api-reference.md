@@ -21,6 +21,7 @@ Unless noted otherwise, request and response bodies are JSON.
 | `GET` | `/api/health` | Public | Service name, status, version, and server time. |
 | `POST` | `/api/auth/register` | Public | Register a handle and password; returns token and user. |
 | `POST` | `/api/auth/login` | Public | Sign in; returns token and user. |
+| `DELETE` | `/api/auth/session` | Player | Revoke the bearer session on the server. |
 | `POST` | `/api/auth/local-management` | Local | Create the WinUI administrator session using `X-Tcg-Management-Key`. |
 
 Registration and login body:
@@ -77,8 +78,8 @@ Friend body:
 | `DELETE` | `/api/matchmaking/leave` | Player | Leave the current queue. |
 | `GET` | `/api/matchmaking/me` | Player | Return the current user's queue entries. |
 | `POST` | `/api/games` | Player | Create a game and optionally add an AI player. |
-| `GET` | `/api/games` | Public | List in-memory games. |
-| `GET` | `/api/games/{id}` | Public | Return one game state. |
+| `GET` | `/api/games` | Player | List games the caller participates in; administrators can list all games. |
+| `GET` | `/api/games/{id}` | Player participant | Return a game state for a participant; administrators can inspect any game. |
 | `POST` | `/api/games/{id}/actions` | Player | Execute a ruleset-defined action after server legality, phase, condition, cost, and effect enforcement. |
 | `DELETE` | `/api/games/{id}` | Admin | Terminate a game. |
 
@@ -125,9 +126,9 @@ Create-game body:
 | `POST` | `/api/state-machines/configurations/upload` | Admin | Upload a JSON configuration as multipart field `file`. |
 | `DELETE` | `/api/state-machines/configurations/{id}` | Admin | Delete an unused configuration. |
 | `POST` | `/api/state-machines` | Player | Create an instance from a configuration. |
-| `GET` | `/api/state-machines` | Admin | List all instances. |
-| `GET` | `/api/state-machines/{id}` | Public | Return one instance. |
-| `POST` | `/api/state-machines/{id}/transitions` | Player | Apply a legal transition. |
+| `GET` | `/api/state-machines` | Player participant | List the caller's workflow instances; administrators can list all instances. |
+| `GET` | `/api/state-machines/{id}` | Player participant | Return an instance to its owner, participant, or administrator. |
+| `POST` | `/api/state-machines/{id}/transitions` | Player participant | Apply a legal transition when the caller is an instance participant. |
 | `DELETE` | `/api/state-machines/{id}` | Admin | Terminate an instance. |
 
 Create-instance body:
@@ -135,9 +136,12 @@ Create-instance body:
 ```json
 {
   "configurationId": "workflow",
-  "data": { "requestedBy": "player-id" }
+  "data": { "requestedBy": "player-id" },
+  "participantIds": ["another-player-id"]
 }
 ```
+
+The creator is always added as the instance owner and participant. Add `participantIds` when the workflow is intended to coordinate more than one player.
 
 Transition body:
 
@@ -182,6 +186,7 @@ Wallet-adjustment body:
 | `PUT` | `/api/admin/bots/{id}` | Admin | Create or replace a bot profile. |
 | `DELETE` | `/api/admin/bots/{id}` | Admin | Delete a bot profile. |
 | `POST` | `/api/admin/bots/{id}/simulations` | Admin | Run deterministic baseline simulations. |
+| `POST` | `/api/admin/bots/{id}/rollback` | Admin | Restore the bot's prior model assignment when one is available. |
 
 Bot body:
 

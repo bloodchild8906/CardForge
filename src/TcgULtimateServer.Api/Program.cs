@@ -4,7 +4,9 @@ using System.Diagnostics;
 using System.Net;
 using System.Security.Cryptography;
 using System.Text;
+using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.Http.Json;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.AspNetCore.ResponseCompression;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.Net.Http.Headers;
@@ -19,6 +21,12 @@ if (string.IsNullOrWhiteSpace(localManagementKey))
 }
 
 var builder = WebApplication.CreateBuilder(args);
+var allowedOrigins = (Environment.GetEnvironmentVariable("TCG_ALLOWED_ORIGINS") ?? "")
+    .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+    .Where(origin => Uri.TryCreate(origin, UriKind.Absolute, out var uri) &&
+                     (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps))
+    .Distinct(StringComparer.OrdinalIgnoreCase)
+    .ToArray();
 
 // Explicitly remove any upper limit on the number of concurrent client connections so the
 // server can scale to an unbounded number of connected SignalR/REST clients. Both Kestrel
@@ -31,6 +39,7 @@ builder.WebHost.ConfigureKestrel(o =>
 });
 
 builder.Services.Configure<JsonOptions>(o => o.SerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase);
+builder.Services.AddProblemDetails();
 builder.Services.AddResponseCompression(o =>
 {
     o.EnableForHttps = true;
@@ -52,8 +61,32 @@ builder.Services.AddSingleton<SecurePacketService>();
 builder.Services.AddSingleton<IAssetStore, InMemoryAssetStore>();
 builder.Services.AddSingleton<AssetService>();
 builder.Services.AddSignalR();
-builder.Services.AddCors(o => o.AddDefaultPolicy(p => p.AllowAnyHeader().AllowAnyMethod().AllowCredentials().SetIsOriginAllowed(_ => true)));
+builder.Services.AddCors(options => options.AddDefaultPolicy(policy =>
+{
+    if (allowedOrigins.Length == 0)
+    {
+        // Native Unity and WinUI clients do not require browser CORS. Browser access must opt in explicitly.
+        policy.SetIsOriginAllowed(_ => false);
+        return;
+    }
+
+    policy.WithOrigins(allowedOrigins).AllowAnyHeader().AllowAnyMethod().AllowCredentials();
+}));
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    options.AddPolicy("authentication", context => RateLimitPartition.GetFixedWindowLimiter(
+        context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+        _ => new FixedWindowRateLimiterOptions
+        {
+            PermitLimit = 10,
+            Window = TimeSpan.FromMinutes(1),
+            QueueLimit = 0,
+            AutoReplenishment = true
+        }));
+});
 var app = builder.Build();
+app.UseExceptionHandler();
 app.UseResponseCompression();
 app.Use(async (context, next) =>
 {
@@ -69,8 +102,17 @@ app.Use(async (context, next) =>
             context.RequestServices.GetRequiredService<AuditLogService>().Write("Information", "request", $"{context.Request.Method} {context.Request.Path}", requestPath: context.Request.Path, statusCode: context.Response.StatusCode);
     }
 });
-app.Use(async (context, next) => { context.Response.Headers["X-Content-Type-Options"] = "nosniff"; context.Response.Headers["X-Frame-Options"] = "DENY"; context.Response.Headers["Referrer-Policy"] = "no-referrer"; await next(); });
+app.Use(async (context, next) =>
+{
+    context.Response.Headers["X-Content-Type-Options"] = "nosniff";
+    context.Response.Headers["X-Frame-Options"] = "DENY";
+    context.Response.Headers["Referrer-Policy"] = "no-referrer";
+    context.Response.Headers["Permissions-Policy"] = "camera=(), geolocation=(), microphone=()";
+    context.Response.Headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'; base-uri 'none'";
+    await next();
+});
 app.UseHsts(); app.UseHttpsRedirection(); app.UseCors();
+app.UseRateLimiter();
 
 var state = app.Services.GetRequiredService<AppState>();
 var rules = app.Services.GetRequiredService<RulesEngine>();
@@ -78,7 +120,11 @@ var assetService = app.Services.GetRequiredService<AssetService>();
 Seed(state, assetService);
 rules.Save(state.RulePacks["mtg-like"]);
 
-app.MapPost("/api/auth/register", (RegisterRequest request, AuthService auth) => Results.Ok(auth.Register(request)));
+app.MapPost("/api/auth/register", (RegisterRequest request, AuthService auth) =>
+{
+    try { return Results.Ok(auth.Register(request)); }
+    catch (InvalidOperationException exception) { return Results.BadRequest(exception.Message); }
+}).RequireRateLimiting("authentication");
 app.MapGet("/", () => Results.NotFound());
 app.MapGet("/api/health", (AppState state) => Results.Ok(new
 {
@@ -88,7 +134,16 @@ app.MapGet("/api/health", (AppState state) => Results.Ok(new
     serverTime = DateTimeOffset.UtcNow,
     maintenanceMode = state.Settings.MaintenanceMode
 }));
-app.MapPost("/api/auth/login", (LoginRequest request, AuthService auth) => Results.Ok(auth.Login(request)));
+app.MapPost("/api/auth/login", (LoginRequest request, AuthService auth) =>
+{
+    try { return Results.Ok(auth.Login(request)); }
+    catch (UnauthorizedAccessException) { return Results.Unauthorized(); }
+}).RequireRateLimiting("authentication");
+app.MapDelete("/api/auth/session", (HttpRequest request, AuthService auth) =>
+{
+    var token = request.Headers.Authorization.FirstOrDefault()?.Replace("Bearer ", "", StringComparison.OrdinalIgnoreCase);
+    return auth.Revoke(token) ? Results.NoContent() : Results.Unauthorized();
+});
 app.MapPost("/api/auth/local-management", (HttpRequest request, AuthService auth) =>
 {
     if (request.HttpContext.Connection.RemoteIpAddress is not { } remoteAddress || !IPAddress.IsLoopback(remoteAddress))
@@ -504,18 +559,30 @@ app.MapDelete("/api/state-machines/configurations/{id}", (string id, HttpRequest
 });
 app.MapPost("/api/state-machines", (CreateStateMachineRequest request, HttpRequest http, AuthService auth, StateMachineService machines) =>
 {
-    if (auth.FromToken(http.Headers.Authorization.FirstOrDefault()?.Replace("Bearer ", "", StringComparison.OrdinalIgnoreCase)) is null) return Results.Unauthorized();
-    try { return Results.Ok(machines.Create(request)); }
+    var user = auth.FromToken(http.Headers.Authorization.FirstOrDefault()?.Replace("Bearer ", "", StringComparison.OrdinalIgnoreCase));
+    if (user is null) return Results.Unauthorized();
+    try { return Results.Ok(machines.Create(request, user.Id)); }
     catch (KeyNotFoundException exception) { return Results.NotFound(exception.Message); }
 });
 app.MapGet("/api/state-machines", (HttpRequest http, AuthService auth, AdminService admin, AppState s) =>
 {
     var user = auth.FromToken(http.Headers.Authorization.FirstOrDefault()?.Replace("Bearer ", "", StringComparison.OrdinalIgnoreCase));
-    return user is null ? Results.Unauthorized() : admin.IsAdmin(user) ? Results.Ok(s.StateMachineInstances.Values) : Results.Forbid();
+    if (user is null) return Results.Unauthorized();
+    return admin.IsAdmin(user)
+        ? Results.Ok(s.StateMachineInstances.Values)
+        : Results.Ok(s.StateMachineInstances.Values.Where(instance =>
+            string.Equals(instance.OwnerId, user.Id, StringComparison.Ordinal) ||
+            instance.ParticipantIds.Contains(user.Id, StringComparer.Ordinal)));
 });
-app.MapGet("/api/state-machines/{id}", (string id, StateMachineService machines) =>
+app.MapGet("/api/state-machines/{id}", (string id, HttpRequest http, AuthService auth, AdminService admin, StateMachineService machines) =>
 {
-    try { return Results.Ok(machines.GetInstance(id)); }
+    var user = auth.FromToken(http.Headers.Authorization.FirstOrDefault()?.Replace("Bearer ", "", StringComparison.OrdinalIgnoreCase));
+    if (user is null) return Results.Unauthorized();
+    try
+    {
+        var instance = machines.GetInstance(id);
+        return machines.CanAccess(instance, user.Id, admin.IsAdmin(user)) ? Results.Ok(instance) : Results.NotFound("Workflow not found.");
+    }
     catch (KeyNotFoundException exception) { return Results.NotFound(exception.Message); }
 });
 app.MapDelete("/api/state-machines/{id}", (string id, HttpRequest request, AuthService auth, AdminService admin, AppState s, AuditLogService audit) =>
@@ -527,11 +594,16 @@ app.MapDelete("/api/state-machines/{id}", (string id, HttpRequest request, AuthS
     audit.Write("Information", "workflows", $"Removed state-machine instance {id}.", user.Id);
     return Results.NoContent();
 });
-app.MapPost("/api/state-machines/{id}/transitions", (string id, TransitionStateMachineRequest request, HttpRequest http, AuthService auth, StateMachineService machines) =>
+app.MapPost("/api/state-machines/{id}/transitions", (string id, TransitionStateMachineRequest request, HttpRequest http, AuthService auth, AdminService admin, StateMachineService machines) =>
 {
     var user = auth.FromToken(http.Headers.Authorization.FirstOrDefault()?.Replace("Bearer ", "", StringComparison.OrdinalIgnoreCase));
     if (user is null) return Results.Unauthorized();
-    try { return Results.Ok(machines.Transition(id, user.Id, request)); }
+    try
+    {
+        var instance = machines.GetInstance(id);
+        if (!machines.CanAccess(instance, user.Id, admin.IsAdmin(user))) return Results.NotFound("Workflow not found.");
+        return Results.Ok(machines.Transition(id, user.Id, request));
+    }
     catch (KeyNotFoundException exception) { return Results.NotFound(exception.Message); }
     catch (InvalidOperationException exception) { return Results.BadRequest(exception.Message); }
 });
@@ -688,11 +760,30 @@ app.MapPost("/api/games", (CreateGameRequest request, HttpRequest http, AuthServ
 {
     var user = auth.FromToken(http.Headers.Authorization.FirstOrDefault()?.Replace("Bearer ", "")); if (user is null) return Results.Unauthorized();
     if (!s.RulePacks.ContainsKey(request.RulePackId)) return Results.BadRequest("Unknown rule pack.");
-    var players = request.PlayerIds.Distinct().ToList(); if (!players.Contains(user.Id)) players.Insert(0, user.Id); if (request.AddAi) players.Add("bot-" + Guid.NewGuid().ToString("N")[..8]);
+    var players = request.PlayerIds.Distinct(StringComparer.Ordinal).ToList();
+    if (players.Any(playerId => !s.Users.ContainsKey(playerId))) return Results.BadRequest("Every player must be a registered user.");
+    if (!players.Contains(user.Id, StringComparer.Ordinal)) players.Insert(0, user.Id);
+    if (request.AddAi) players.Add("bot-" + Guid.NewGuid().ToString("N")[..8]);
+    if (players.Count is < 2 or > 8) return Results.BadRequest("A game needs between two and eight players.");
     var game = new GameState { RulePackId = request.RulePackId, Players = players }; engine.Start(game); s.Games[game.Id] = game; return Results.Ok(game);
 });
-app.MapGet("/api/games", (AppState s) => s.Games.Values);
-app.MapGet("/api/games/{id}", (string id, AppState s) => s.Games.TryGetValue(id, out var game) ? Results.Ok(game) : Results.NotFound());
+app.MapGet("/api/games", (HttpRequest http, AuthService auth, AdminService admin, AppState s) =>
+{
+    var user = auth.FromToken(http.Headers.Authorization.FirstOrDefault()?.Replace("Bearer ", "", StringComparison.OrdinalIgnoreCase));
+    if (user is null) return Results.Unauthorized();
+    return admin.IsAdmin(user)
+        ? Results.Ok(s.Games.Values)
+        : Results.Ok(s.Games.Values.Where(game => game.Players.Contains(user.Id, StringComparer.Ordinal)));
+});
+app.MapGet("/api/games/{id}", (string id, HttpRequest http, AuthService auth, AdminService admin, AppState s) =>
+{
+    var user = auth.FromToken(http.Headers.Authorization.FirstOrDefault()?.Replace("Bearer ", "", StringComparison.OrdinalIgnoreCase));
+    if (user is null) return Results.Unauthorized();
+    return s.Games.TryGetValue(id, out var game) &&
+           (admin.IsAdmin(user) || game.Players.Contains(user.Id, StringComparer.Ordinal))
+        ? Results.Ok(game)
+        : Results.NotFound("Game not found.");
+});
 app.MapPost("/api/games/{id}/actions", (string id, ExecuteGameActionRequest action, HttpRequest request, AuthService auth, AppState s, RulesEngine engine, BotService bots) =>
 {
     var user = auth.FromToken(request.Headers.Authorization.FirstOrDefault()?.Replace("Bearer ", "", StringComparison.OrdinalIgnoreCase));

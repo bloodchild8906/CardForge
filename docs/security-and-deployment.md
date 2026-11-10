@@ -66,12 +66,20 @@ When deploying behind IIS, Nginx, Apache, a cloud load balancer, or another prox
 
 ## CORS
 
-Development CORS settings are not a production allowlist. Configure only approved origins for browser-based clients. Native Unity and .NET clients are not governed by browser CORS, but the server should still avoid a broad web-origin policy.
+Browser origins are denied by default. To allow a browser-hosted client, explicitly set the comma-separated allowlist before starting the server:
+
+```powershell
+$env:TCG_ALLOWED_ORIGINS = "https://play.cardforge.example,https://staging.cardforge.example"
+```
+
+Native Unity and .NET clients are not governed by browser CORS. Do not add wildcard origins or a development URL to a production allowlist.
 
 ## Session and token handling
 
 - Treat bearer tokens as secrets.
 - Keep active tokens in memory when possible.
+- Sessions expire after the configured `SessionTimeoutMinutes` period of inactivity (120 minutes by default).
+- Call `DELETE /api/auth/session` when the player signs out to revoke the bearer token immediately.
 - Do not write tokens to logs, analytics, crash reports, URLs, scene assets, or `PlayerPrefs`.
 - Clear the token and stop real-time connections on sign-out or `401`.
 - Use platform-protected credential storage if persistent sessions are added.
@@ -79,7 +87,7 @@ Development CORS settings are not a production allowlist. Configure only approve
 
 ## Passwords and account policy
 
-The server owns registration and login. Production hardening should add the organization's password length, breach screening, retry throttling, lockout, recovery, and optional multi-factor requirements. Do not implement those controls only in the client.
+The server requires handles of 3-24 characters and passwords of 8-256 characters. Passwords are salted PBKDF2-SHA256 hashes, and registration/login are limited to ten requests per minute per source IP. Production hardening should still add breach screening, account lockout, recovery, and optional multi-factor requirements. Do not implement those controls only in the client.
 
 ## Secure SignalR actions
 
@@ -125,7 +133,7 @@ Until durable storage is implemented:
 
 ## Network exposure review
 
-The current API includes several intentionally public read routes for development and client discovery, including rule packs, rankings, queue status, game state, workflow definitions, and inventory-by-user-ID. Review every public route before an internet deployment and apply authentication or response shaping where the product's privacy model requires it.
+The current API intentionally keeps rule packs, rankings, queue status, workflow definitions, and inventory-by-user-ID discoverable for development and client bootstrap. Game state and workflow instances are restricted to their participants or administrators. Review every public route before an internet deployment and apply authentication or response shaping where the product's privacy model requires it.
 
 ## Production checklist
 
@@ -133,11 +141,11 @@ The current API includes several intentionally public read routes for developmen
 - [ ] Run a Release build under a dedicated service identity.
 - [ ] Use a trusted TLS certificate and HTTPS-only exposure.
 - [ ] Enable WebSocket forwarding for SignalR.
-- [ ] Restrict CORS to approved browser origins.
+- [ ] Set `TCG_ALLOWED_ORIGINS` when deploying a browser client.
 - [ ] Keep local management loopback-only.
 - [ ] Store environment secrets outside source control.
 - [ ] Define administrator provisioning and role-review procedures.
-- [ ] Add session expiry, revocation, and login throttling.
+- [x] Session expiry, revocation, and login throttling are enabled.
 - [ ] Configure durable audit storage and centralized monitoring.
 - [ ] Review public routes against privacy requirements.
 - [ ] Add durable gameplay and operations storage.
@@ -145,4 +153,3 @@ The current API includes several intentionally public read routes for developmen
 - [ ] Load-test REST, matchmaking, and SignalR connections.
 - [ ] Validate Unity and other clients on every target platform.
 - [ ] Document incident, rollback, and maintenance procedures.
-

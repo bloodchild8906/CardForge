@@ -5,18 +5,31 @@ namespace TcgULtimateServer.Api.Services;
 
 public sealed class AuthService(AppState state)
 {
+    private const int MinimumPasswordLength = 8;
+    private const int MaximumPasswordLength = 256;
+    private readonly object registrationGate = new();
+
     public AuthResponse Register(RegisterRequest request)
     {
-        if (request.Handle.Length is < 3 or > 24 || request.Password.Length < 6) throw new InvalidOperationException("Handle or password is invalid.");
+        if (string.IsNullOrWhiteSpace(request.Handle) || string.IsNullOrWhiteSpace(request.Password) ||
+            request.Handle.Trim().Length is < 3 or > 24 ||
+            request.Password.Length is < MinimumPasswordLength or > MaximumPasswordLength)
+            throw new InvalidOperationException($"Handles must be 3-24 characters and passwords must be {MinimumPasswordLength}-{MaximumPasswordLength} characters.");
+
         var normalized = request.Handle.Trim().ToLowerInvariant();
-        if (state.Users.Values.Any(u => u.Handle.Equals(normalized, StringComparison.OrdinalIgnoreCase))) throw new InvalidOperationException("Handle already exists.");
-        var handle = request.Handle.Trim();
-        var role = ConfiguredAdminHandles().Contains(handle, StringComparer.OrdinalIgnoreCase) ? "admin" : "user";
-        var user = new User(Guid.NewGuid().ToString("N"), handle, Hash(request.Password), Role: role);
-        state.Users[user.Id] = user;
-        state.Inventories[user.Id] = new Inventory([], []);
-        state.Wallets[user.Id] = CreateWallet();
-        return CreateSession(user);
+        lock (registrationGate)
+        {
+            if (state.Users.Values.Any(u => u.Handle.Equals(normalized, StringComparison.OrdinalIgnoreCase)))
+                throw new InvalidOperationException("Handle already exists.");
+
+            var handle = request.Handle.Trim();
+            var role = ConfiguredAdminHandles().Contains(handle, StringComparer.OrdinalIgnoreCase) ? "admin" : "user";
+            var user = new User(Guid.NewGuid().ToString("N"), handle, Hash(request.Password), Role: role);
+            state.Users[user.Id] = user;
+            state.Inventories[user.Id] = new Inventory([], []);
+            state.Wallets[user.Id] = CreateWallet();
+            return CreateSession(user);
+        }
     }
 
     public AuthResponse Login(LoginRequest request)
@@ -40,17 +53,33 @@ public sealed class AuthService(AppState state)
 
     public User? FromToken(string? token)
     {
-        if (token is null || !state.Sessions.TryGetValue(token, out var id) || !state.Users.TryGetValue(id, out var user) || user.Disabled)
+        if (token is null || !state.Sessions.TryGetValue(token, out var id) || !state.SessionActivity.TryGetValue(token, out var lastSeen) ||
+            DateTimeOffset.UtcNow - lastSeen > TimeSpan.FromMinutes(state.Settings.SessionTimeoutMinutes) ||
+            !state.Users.TryGetValue(id, out var user) || user.Disabled)
+        {
+            if (token is not null)
+                Revoke(token);
             return null;
+        }
+
         state.SessionActivity[token] = DateTimeOffset.UtcNow;
         return user;
+    }
+
+    public bool Revoke(string? token)
+    {
+        if (string.IsNullOrWhiteSpace(token))
+            return false;
+
+        state.SessionActivity.TryRemove(token, out _);
+        return state.Sessions.TryRemove(token, out _);
     }
 
     public PresenceSnapshot Presence()
     {
         var now = DateTimeOffset.UtcNow;
         var activeSince = now.AddMinutes(-2);
-        var staleBefore = now.AddHours(-24);
+        var staleBefore = now.AddMinutes(-state.Settings.SessionTimeoutMinutes);
         foreach (var stale in state.SessionActivity.Where(pair => pair.Value < staleBefore).ToList())
         {
             state.SessionActivity.TryRemove(stale.Key, out _);
@@ -91,5 +120,18 @@ public sealed class AuthService(AppState state)
         [state.Economy.PremiumCurrency] = 0
     });
     private static string Hash(string password) { var salt = RandomNumberGenerator.GetBytes(16); var key = Rfc2898DeriveBytes.Pbkdf2(password, salt, 120_000, HashAlgorithmName.SHA256, 32); return $"{Convert.ToBase64String(salt)}:{Convert.ToBase64String(key)}"; }
-    private static bool Verify(string password, string encoded) { var parts = encoded.Split(':'); if (parts.Length != 2) return false; var key = Rfc2898DeriveBytes.Pbkdf2(password, Convert.FromBase64String(parts[0]), 120_000, HashAlgorithmName.SHA256, 32); return CryptographicOperations.FixedTimeEquals(key, Convert.FromBase64String(parts[1])); }
+    private static bool Verify(string password, string encoded)
+    {
+        try
+        {
+            var parts = encoded.Split(':');
+            if (parts.Length != 2) return false;
+            var key = Rfc2898DeriveBytes.Pbkdf2(password, Convert.FromBase64String(parts[0]), 120_000, HashAlgorithmName.SHA256, 32);
+            return CryptographicOperations.FixedTimeEquals(key, Convert.FromBase64String(parts[1]));
+        }
+        catch (FormatException)
+        {
+            return false;
+        }
+    }
 }

@@ -54,12 +54,19 @@ public sealed class StateMachineService(AppState state)
             ? configuration
             : throw new KeyNotFoundException("State machine configuration not found.");
 
-    public StateMachineInstance Create(CreateStateMachineRequest request)
+    public StateMachineInstance Create(CreateStateMachineRequest request, string ownerId)
     {
         var configuration = GetConfiguration(request.ConfigurationId);
+        var participants = (request.ParticipantIds ?? [])
+            .Append(ownerId)
+            .Where(id => !string.IsNullOrWhiteSpace(id))
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
         var instance = new StateMachineInstance
         {
             ConfigurationId = configuration.Id,
+            OwnerId = ownerId,
+            ParticipantIds = participants,
             CurrentState = configuration.InitialState,
             Data = request.Data?.ToDictionary(pair => pair.Key, pair => pair.Value.Clone()) ?? [],
             Context = request.Data?.ToDictionary(pair => pair.Key, pair => pair.Value.Clone()) ?? []
@@ -68,6 +75,10 @@ public sealed class StateMachineService(AppState state)
         state.StateMachineInstances[instance.Id] = instance;
         return instance;
     }
+
+    public bool CanAccess(StateMachineInstance instance, string userId, bool isAdministrator) =>
+        isAdministrator || string.Equals(instance.OwnerId, userId, StringComparison.Ordinal) ||
+        instance.ParticipantIds.Contains(userId, StringComparer.Ordinal);
 
     public StateMachineInstance GetInstance(string id) =>
         state.StateMachineInstances.TryGetValue(id, out var instance)

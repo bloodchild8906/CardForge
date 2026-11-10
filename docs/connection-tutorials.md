@@ -42,6 +42,13 @@ curl.exe -k "$baseUrl/api/presence/count"
 
 Use `POST /api/auth/login` with the same `handle` and `password` on later sessions.
 
+When the client signs out, revoke the token as well as clearing it locally:
+
+```powershell
+curl.exe -k -X DELETE "$baseUrl/api/auth/session" `
+  -H "Authorization: Bearer $token"
+```
+
 ## Tutorial 3: connect with .NET `HttpClient`
 
 ```csharp
@@ -314,6 +321,7 @@ Create an instance:
 $workflowBody = @{
   configurationId = "workflow"
   data = @{ requestedBy = $userId }
+  participantIds = @("another-player-id")
 } | ConvertTo-Json -Depth 4 -Compress
 
 $instance = curl.exe -k -X POST "$baseUrl/api/state-machines" `
@@ -330,6 +338,8 @@ transition:{instanceId}:{eventName}
 ```
 
 REST transitions are also available at `POST /api/state-machines/{id}/transitions` with `{ "event": "start", "data": { ... } }`.
+
+Workflow instances are private to their creator and the listed participants. Administrators can inspect every instance. Use `participantIds` only for players who should be able to read, join, or transition that workflow.
 
 ## Troubleshooting
 
